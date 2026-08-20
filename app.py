@@ -13,7 +13,7 @@ from scipy.stats import linregress, theilslopes
 # PAGE CONFIGURATION
 # ============================================================
 st.set_page_config(
-    page_title="Thailand GRACE TWSA DSS FALI ANI",
+    page_title="Thailand GRACE TWSA DSS ",
     page_icon="💧",
     layout="wide",
 )
