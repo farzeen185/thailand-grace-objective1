@@ -206,39 +206,15 @@ def load_data():
 
     basin_gdf = basin_gdf.to_crs("EPSG:4326")
 
-    # Web optimization: the original basin polygons can be very detailed.
-    # At Thailand-wide display scale, simplifying to ~0.01 degree (~1 km)
-    # greatly reduces the GeoJSON size and makes the interactive map smoother
-    # while preserving basin topology.
-    basin_gdf = basin_gdf[["MB_CODE", "MBASIN_E", "geometry"]].copy()
-    basin_gdf["geometry"] = basin_gdf.geometry.simplify(
-        tolerance=0.01, preserve_topology=True
-    )
-    basin_gdf = basin_gdf.loc[
-        basin_gdf.geometry.notna() & ~basin_gdf.geometry.is_empty
-    ].copy()
-
     national = national.sort_values("month_date").reset_index(drop=True)
     basin = basin.sort_values(["MB_CODE", "month_date"]).reset_index(drop=True)
     trend = trend.sort_values("sen_slope_cm_per_year").reset_index(drop=True)
     climatology = climatology.sort_values(["MB_CODE", "calendar_month"]).reset_index(drop=True)
 
-    # Build the simplified GeoJSON while inside the cached loader so this
-    # conversion is not repeated on every widget interaction.
-    basin_geojson = basin_gdf.__geo_interface__
-
-    return national, basin, trend, climatology, seasonal, basin_gdf, basin_geojson
+    return national, basin, trend, climatology, seasonal, basin_gdf
 
 
-(
-    national_df,
-    basin_df,
-    trend_df,
-    clim_df,
-    seasonal_df,
-    basin_gdf,
-    BASIN_GEOJSON,
-) = load_data()
+national_df, basin_df, trend_df, clim_df, seasonal_df, basin_gdf = load_data()
 
 
 # ============================================================
@@ -392,50 +368,9 @@ location_labels = ["Thailand national level"] + [
 label_to_code = {"Thailand national level": "NATIONAL"}
 for row in basin_options.itertuples(index=False):
     label_to_code[f"{row.MB_CODE} — {row.MBASIN_E}"] = row.MB_CODE
-code_to_label = {code: label for label, code in label_to_code.items()}
-
-
-def handle_basin_map_selection():
-    """Sync a clicked map polygon with the global basin selector."""
-    event = st.session_state.get("basin_map_event")
-    if not event:
-        return
-
-    try:
-        points = event["selection"]["points"]
-    except (KeyError, TypeError):
-        return
-
-    if not points:
-        return
-
-    point = points[0]
-    code = point.get("location")
-
-    # Fallback for Plotly versions that expose the value through customdata.
-    if not code:
-        customdata = point.get("customdata")
-        if customdata:
-            code = customdata[0]
-
-    if code is None:
-        return
-
-    code = str(code).strip().replace(".0", "").zfill(2)
-    label = code_to_label.get(code)
-    if label:
-        st.session_state["location_selector"] = label
-
 
 st.sidebar.header("Explore Objective 1")
-if "location_selector" not in st.session_state:
-    st.session_state["location_selector"] = "Thailand national level"
-
-selected_label = st.sidebar.selectbox(
-    "Location",
-    location_labels,
-    key="location_selector",
-)
+selected_label = st.sidebar.selectbox("Location", location_labels)
 selected_code = label_to_code[selected_label]
 selected_name = (
     "Thailand national level"
@@ -447,28 +382,29 @@ selected_series = get_location_series(selected_code)
 series_stats = calculate_series_statistics(selected_series)
 
 st.sidebar.markdown("---")
-page = st.sidebar.radio(
-    "View",
-    [
-        "📈 Dashboard",
-        "🗺️ Monthly Basin Map",
-        "🌦️ Seasonal Cycle",
-        "📉 Trend Analysis",
-        "⬇️ Data",
-    ],
-    key="page_selector",
-)
-
-st.sidebar.markdown("---")
 st.sidebar.caption(
     "GRACE / GRACE-FO TWSA • Whole Thailand • 22 principal river basins"
 )
 
 
 # ============================================================
+# TABS
+# ============================================================
+tab_dashboard, tab_map, tab_season, tab_trend, tab_data = st.tabs(
+    [
+        "📈 Dashboard",
+        "🗺️ Monthly Basin Map",
+        "🌦️ Seasonal Cycle",
+        "📉 Trend Analysis",
+        "⬇️ Data",
+    ]
+)
+
+
+# ============================================================
 # TAB 1 — DASHBOARD
 # ============================================================
-if page == "📈 Dashboard":
+with tab_dashboard:
     st.subheader(selected_name)
 
     if selected_code == "NATIONAL":
@@ -552,7 +488,7 @@ if page == "📈 Dashboard":
 # ============================================================
 # TAB 2 — MONTHLY BASIN MAP
 # ============================================================
-if page == "🗺️ Monthly Basin Map":
+with tab_map:
     st.subheader("Monthly TWSA across Thailand's 22 principal river basins")
 
     observed_months = sorted(
@@ -581,79 +517,30 @@ if page == "🗺️ Monthly Basin Map":
             .copy()
         )
 
-        # Keep all 22 basins on the map even if a basin has no GRACE value
-        # for the selected month. Geometry is not merged/rebuilt here.
-        map_values = basin_options.merge(
+        map_frame = basin_gdf[["MB_CODE", "MBASIN_E", "geometry"]].copy()
+        map_frame = map_frame.merge(
             month_values[["MB_CODE", "twsa_cm"]],
             on="MB_CODE",
             how="left",
         )
 
-        st.caption(
-            "Click any basin on the map to select it. The basin selector in the sidebar "
-            "will update automatically, and the selected basin is outlined."
-        )
+        geojson = map_frame.__geo_interface__
 
         map_figure = px.choropleth(
-            map_values,
-            geojson=BASIN_GEOJSON,
+            map_frame,
+            geojson=geojson,
             locations="MB_CODE",
             featureidkey="properties.MB_CODE",
             color="twsa_cm",
             hover_name="MBASIN_E",
             hover_data={"MB_CODE": True, "twsa_cm": ":.3f"},
-            custom_data=["MB_CODE", "MBASIN_E"],
             color_continuous_midpoint=0,
             labels={"twsa_cm": "TWSA (cm)", "MB_CODE": "Basin code"},
             title=f"Basin-mean GRACE/GRACE-FO TWSA — {pd.Timestamp(selected_month):%B %Y}",
         )
-
-        # Thin basin boundaries for the base map.
-        map_figure.update_traces(
-            marker_line_width=0.6,
-            marker_line_color="rgba(70,70,70,0.65)",
-            selector=dict(type="choropleth"),
-        )
-
-        # Draw the currently selected basin with a strong outline.
-        if selected_code != "NATIONAL":
-            map_figure.add_trace(
-                go.Choropleth(
-                    geojson=BASIN_GEOJSON,
-                    locations=[selected_code],
-                    z=[1],
-                    featureidkey="properties.MB_CODE",
-                    colorscale=[
-                        [0, "rgba(0,0,0,0)"],
-                        [1, "rgba(0,0,0,0)"],
-                    ],
-                    showscale=False,
-                    marker_line_color="black",
-                    marker_line_width=4,
-                    hoverinfo="skip",
-                    name="Selected basin",
-                )
-            )
-
         map_figure.update_geos(fitbounds="locations", visible=False)
-        map_figure.update_layout(
-            height=650,
-            margin={"r": 0, "t": 60, "l": 0, "b": 0},
-            clickmode="event+select",
-            uirevision="thailand-basin-map",
-        )
-        st.plotly_chart(
-            map_figure,
-            use_container_width=True,
-            key="basin_map_event",
-            on_select=handle_basin_map_selection,
-            selection_mode="points",
-            config={
-                "displaylogo": False,
-                "scrollZoom": False,
-                "modeBarButtonsToRemove": ["lasso2d", "select2d"],
-            },
-        )
+        map_figure.update_layout(height=700, margin={"r": 0, "t": 60, "l": 0, "b": 0})
+        st.plotly_chart(map_figure, use_container_width=True)
 
         observed_map_values = month_values.dropna(subset=["twsa_cm"])
         if not observed_map_values.empty:
@@ -672,21 +559,6 @@ if page == "🗺️ Monthly Basin Map":
                 help=str(driest["MBASIN_E"]),
             )
 
-        if selected_code != "NATIONAL":
-            selected_month_row = month_values.loc[month_values["MB_CODE"] == selected_code]
-            if not selected_month_row.empty:
-                selected_value = selected_month_row.iloc[0]["twsa_cm"]
-                if pd.notna(selected_value):
-                    st.success(
-                        f"Selected basin: **{selected_code} — {selected_name}** | "
-                        f"TWSA for {pd.Timestamp(selected_month):%B %Y}: **{selected_value:.2f} cm**"
-                    )
-                else:
-                    st.info(
-                        f"Selected basin: **{selected_code} — {selected_name}** | "
-                        f"No GRACE value for {pd.Timestamp(selected_month):%B %Y}."
-                    )
-
         st.caption(
             "This first web version maps basin-averaged TWSA from the processed 22-basin table. "
             "It is not yet the native GRACE pixel raster map."
@@ -696,7 +568,7 @@ if page == "🗺️ Monthly Basin Map":
 # ============================================================
 # TAB 3 — SEASONAL CYCLE
 # ============================================================
-if page == "🌦️ Seasonal Cycle":
+with tab_season:
     st.subheader(f"Seasonal TWSA cycle — {selected_name}")
 
     if selected_code == "NATIONAL":
@@ -773,7 +645,7 @@ if page == "🌦️ Seasonal Cycle":
 # ============================================================
 # TAB 4 — TREND ANALYSIS
 # ============================================================
-if page == "📉 Trend Analysis":
+with tab_trend:
     st.subheader("Long-term GRACE/GRACE-FO TWSA trends")
     st.caption(
         "Basin trend results are the precomputed Objective 1 outputs using observed months only: "
@@ -839,7 +711,7 @@ if page == "📉 Trend Analysis":
 # ============================================================
 # TAB 5 — DATA
 # ============================================================
-if page == "⬇️ Data":
+with tab_data:
     st.subheader("Download Objective 1 dashboard data")
 
     selected_download = selected_series.copy()
